@@ -6,10 +6,11 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 Host-resident network anomaly detector for Windows with **explainable alerts**.
-Captures live traffic on a chosen interface, learns a per-feature baseline of
-normal behavior, flags anomalies, and ships every alert with the statistical
-reasons that triggered it. Runs entirely on your machine — no telemetry, no
-external services, no LLMs in the detection path.
+Captures live traffic on a chosen interface, learns a baseline of normal
+behavior **separately for each time of day**, flags anomalies, and ships every
+alert with both a plain-language verdict and the statistical reason behind it.
+Runs entirely on your machine — no telemetry, no external services, no ML model
+in the detection path. Pure standard-library statistics.
 
 A live web dashboard (FastAPI + vanilla JS) shows current throughput, an alert
 timeline, top talkers, and click-to-expand details for each alert.
@@ -17,15 +18,33 @@ timeline, top talkers, and click-to-expand details for each alert.
 ## Why this project?
 
 Most consumer-grade IDS/EDR tools give you alerts that boil down to "we noticed
-something." They rarely tell you *why*, and when they do, the reason is hidden
-behind a model you can't inspect. NAD is the opposite:
+something." They rarely tell you *why*, and a single fixed threshold either
+floods you with false alarms or misses real attacks — because people don't use a
+computer the same way every day. NIDS-Win takes the opposite approach:
 
-- **Every alert is reproducible** — the math is `(value − EWMA mean) / EWMA std`,
-  per feature, per time window. You can read the code in 200 lines.
-- **Every alert lists its evidence** — the top source IPs, destination IPs, and
-  destination ports for the offending window are shown alongside the Z-score.
-- **Tunable from the command line** — change `--z-threshold`, `--confirm`, and
-  `--cooldown` until the signal-to-noise ratio fits your environment.
+- **Per-time-of-day baselines** — it learns a separate baseline for each hour
+  bucket, so "9pm gaming" is normal at 9pm but the same traffic at 3am is not.
+- **The threshold tunes itself** — instead of a hand-picked sigma, the cutoff is
+  set from the data to target a false-alarm *rate*. No magic number to guess.
+- **Robust to evasion** — median/MAD statistics mean a burst can't inflate the
+  baseline and blind the next detection.
+- **Every alert is explained twice** — an everyday-Korean verdict for anyone
+  ("데이터 유출 의심 — 평소의 약 18배"), and the exact statistics for analysts.
+- **On-device and inspectable** — the whole detection path is plain Python you
+  can read; nothing leaves the machine.
+
+## Detection capabilities
+
+Two complementary axes, so an attack that hides from one is caught by the other:
+
+| Attack pattern | How it's caught | Component |
+|---|---|---|
+| Sudden spike (port scan, volumetric exfil, DDoS) | per-time-bucket robust Z-score | `AdaptiveDetector` |
+| Low-and-slow drift (gradual exfil, baseline poisoning) | cumulative-sum control chart | CUSUM (visit-anchored) |
+| Burst-then-hide (masking) | median/MAD scale isn't inflated by the burst | robust statistics |
+| Volume-normal but structurally off (one-directional exfil, fan-out) | shape features scored directly | `egress_ratio`, `fan_out` |
+| Never-before-seen external server (quiet C2 / exfil) | persistent identity memory | `FirstSeenDetector` |
+| Off-hours activity | the hour has its own baseline | time-of-day buckets |
 
 ## What you see
 
@@ -36,17 +55,19 @@ sections, all on one screen:
 |---|---|
 | **Status pill** | `정상 감시중` (green) / `워밍업 N` (yellow) / `오류` (red), plus interface name and uptime |
 | **KPI strip** | Alert counts (1h / 24h / total), top affected feature in the last hour, current packets-per-second |
-| **Alert timeline** | 60-minute histogram of alert density. Bar colour = severity (LOW / MED / HIGH based on \|Z-score\|) |
-| **Detected anomalies** | Sortable table of alerts. Click a row to expand: Korean explanation, top 5 source IPs, top 5 destination IPs, top 5 destination ports, raw stats (current vs baseline, Z-score, direction) |
-| **Live network activity** | Top talkers (source IPs / destination IPs / destination ports) and TCP / UDP / ICMP / OTHER protocol mix for the *current* 1-second window |
+| **Alert timeline** | 60-minute histogram of alert density, coloured by severity |
+| **Detected anomalies** | Sortable table. Each row shows a named verdict (e.g. `포트 스캔 의심`) and severity; click to expand the plain-language summary, recommended action, top talkers, and the raw statistics |
+| **Live network activity** | Top talkers (source / destination IPs, destination ports) and TCP / UDP / ICMP / OTHER protocol mix for the *current* 1-second window |
 
-Every alert carries a deterministic, one-line explanation built straight from
-the EWMA statistics — no LLM, no template randomisation:
+Each alert carries a plain-language verdict; the jargon is tucked into a
+collapsible technical-detail section:
 
 ```text
-unique_dst_ips — 평소 대비 4.2σ 초과 (현재 30.0 IPs, 기준 11.6 ±2.5).
-주요 출발지: 172.23.14.16(150), 151.106.247.9(77), 64.233.185.95(15).
-주요 목적지 포트: 7338(106), 55544(77), 443(40).
+[심각] 분산 공격(DDoS)/출발지 위조 의심
+  갑자기 매우 많은 서로 다른 출발지에서 트래픽이 쏟아지고 있습니다
+  (565곳, 평소의 약 185배). DDoS 공격이나 출발지 위조(spoofing)일 수 있습니다.
+  → 권장: 지속되면 인터넷 연결을 차단하고 네트워크 관리자에게 알리세요.
+  (기술 상세: unique_src_ips — 평소 대비 185배 ↑ ...)
 ```
 
 ## Status
@@ -54,26 +75,27 @@ unique_dst_ips — 평소 대비 4.2σ 초과 (현재 30.0 IPs, 기준 11.6 ±2.
 | Component | State |
 |---|---|
 | Windows packet capture (Npcap via direct ctypes → `wpcap.dll`) | ✅ verified on Windows 11 |
-| Time-window feature aggregation | ✅ |
-| Statistical anomaly detection (EWMA + Z-score with N-window confirm) | ✅ |
+| Time-window feature aggregation (incl. directional / shape features) | ✅ |
+| Baseline detector (EWMA + Z-score, N-window confirm) | ✅ |
+| Adaptive detector (per-time-bucket robust baselines + self-tuning threshold) | ✅ |
+| CUSUM low-and-slow drift detection | ✅ |
+| First-seen external-destination detection (persistent memory) | ✅ |
+| Plain-language alert classifier (category / severity / recommendation) | ✅ |
 | SQLite alert storage | ✅ |
-| FastAPI live dashboard with SIEM-style UI | ✅ |
-| Two-stage detection (Isolation Forest) | ⏳ planned |
-| SHAP-backed feature attribution | ⏳ planned |
+| FastAPI live dashboard | ✅ |
+| Beacon (periodicity) detection for C2 | ⏳ planned |
 | Windows Service installer | ⏳ planned |
 
 ## Requirements
 
-- **Windows 10 or 11** (64-bit)
+- **Windows 10 or 11** (64-bit) — for live capture
 - **Python 3.11 or newer**
-- **[Npcap](https://npcap.com/)**, installed with **"Install Npcap in WinPcap
-  API-compatible Mode"** checked (default in modern installers)
-- **Administrator privileges** when running the capture commands — Windows
-  requires elevation for raw packet capture
+- **[Npcap](https://npcap.com/)**, installed in **WinPcap API-compatible Mode**
+- **Administrator privileges** when running the capture commands
 
-You do **not** need MSVC Build Tools, the Windows SDK, or Visual Studio. The
-package talks to Npcap's `wpcap.dll` directly through `ctypes` — no native
-Python wheels to compile.
+You do **not** need MSVC Build Tools or Visual Studio — capture talks to Npcap's
+`wpcap.dll` directly through `ctypes`. The offline evaluation scripts below need
+none of this and run on any OS.
 
 ## Installation
 
@@ -82,7 +104,7 @@ git clone https://github.com/Seok-Hyun-Ann/NIDS-Win.git
 cd NIDS-Win
 
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\Activate.ps1
 
 pip install -e ".[dev]"
 ```
@@ -94,119 +116,154 @@ Open a terminal **as Administrator**, then:
 ```powershell
 # 1. List available interfaces
 nad list-interfaces
-# →  \Device\NPF_{F2EF76A2-...}        (VMware VMnet1)
-#    \Device\NPF_{A5CB34C2-...}        (Realtek PCIe GbE)
-#    \Device\NPF_{500A84C1-...}        (VMware VMnet8)
+# →  \Device\NPF_{A5CB34C2-...}        (Realtek PCIe GbE)
 
-# 2. Smoke-test capture (10 packets from your physical NIC)
+# 2. Smoke-test capture (10 packets)
 nad capture --interface "\Device\NPF_{A5CB34C2-...}" --limit 10
 
-# 3. Launch the live dashboard
-nad serve --interface "\Device\NPF_{A5CB34C2-...}"
+# 3. Launch the live dashboard with the adaptive engine
+nad serve --interface "\Device\NPF_{A5CB34C2-...}" --detector adaptive
 #   → http://127.0.0.1:8000
 ```
 
-Open the URL in your browser and you'll see the dashboard. The first ~30
-seconds are a warmup phase where the baseline learns your normal traffic; no
-alerts fire during that window.
+The first ~30 seconds are a warmup. Leave it running for hours/days so the
+per-hour baselines settle and detection sharpens.
 
 > **Tip — finding your interface:** the `\Device\NPF_{...}` strings are GUIDs.
-> Match them against `Get-NetAdapter` in PowerShell to find which one is your
-> physical NIC vs. virtual adapters.
+> Match them against `Get-NetAdapter | Select Name, InterfaceGuid` in PowerShell.
+
+### Try it without a NIC
+
+The evaluation scripts need no Npcap and no Administrator. On a Korean console,
+run `$env:PYTHONIOENCODING="utf-8"` first so Korean/emoji print correctly.
+
+```powershell
+# Synthetic labelled benchmark: 7 attacks vs. 3 detector stacks
+python scripts/evaluate.py
+python scripts/evaluate.py --sweep        # low-and-slow detection across ramp speeds
+
+# Replay real pcaps through the full pipeline (chains files on one clock,
+# so an attack capture can be appended after a normal one to build a baseline)
+python scripts/replay_pcap.py normal.pcap attack.pcap
+
+# Unsupervised separability on the UNSW-NB15 flow dataset
+python scripts/eval_unsw.py
+```
+
+> Datasets and pcaps are **not** included (too large, gitignored). Sample pcaps
+> are read via `dpkt`; UNSW-NB15 / CIC-IoT-2023 CSVs are downloaded into `Data/`.
 
 ## How it works
 
 ```
-┌──────────────┐    packets     ┌──────────────┐   features   ┌──────────────┐
-│ Npcap        │ ─────────────▶ │ Window       │ ───────────▶ │ EWMA Z-score │
-│ (wpcap.dll)  │                │ Aggregator   │              │ Detector     │
-└──────────────┘                │ (1s buckets) │              └──────┬───────┘
-                                └──────────────┘                     │ alerts
-                                                                     ▼
-                                ┌──────────────┐              ┌──────────────┐
-                                │ FastAPI app  │ ◀─── reads ─ │ SQLite store │
-                                │ + dashboard  │              └──────────────┘
-                                └──────────────┘
+┌────────────┐  packets  ┌────────────┐ features ┌────────────────────────┐
+│ Npcap      │ ────────▶ │ Window     │ ───────▶ │ AdaptiveDetector       │
+│ (wpcap.dll)│           │ Aggregator │          │  robust Z per bucket   │─┐
+└────────────┘           │ (1s)       │          │  + auto threshold      │ │
+                         └─────┬──────┘          │  + CUSUM (slow drift)  │ │ alerts
+                               │                 ├────────────────────────┤ ├─▶ classify ─▶ SQLite ─▶ dashboard
+                               └────────────────▶│ FirstSeenDetector      │ │
+                                                 │  new external dests    │─┘
+                                                 └────────────────────────┘
 ```
 
-For each 1-second window the aggregator computes 9 numeric features (packet
-count, byte total, average payload size, unique source/destination IPs,
-unique destination ports, TCP/UDP/ICMP counts) plus the top-K source IPs,
-destination IPs, and destination ports for context.
+For each 1-second window the aggregator computes 9 volume/count features (packet
+count, byte total, average payload size, unique source/destination IPs, unique
+destination ports, TCP/UDP/ICMP counts) plus 2 **shape** features —
+`egress_ratio` (% of bytes outbound) and `fan_out` (destinations per source) —
+and the top-K talkers for context.
 
-The detector keeps an online EWMA mean and variance per feature. When a
-feature's value is more than `--z-threshold` standard deviations from its
-baseline for `--confirm` consecutive windows, an alert fires. After firing,
-that feature is muted for `--cooldown` windows while the EWMA absorbs any
-sustained legitimate change (e.g., you started a download).
+The **adaptive detector** keeps a robust **EWMA median + MAD** per `(time-bucket,
+feature)`; outliers barely move it, so a burst can't blind the next detection.
+The threshold is self-tuning: a robust floor raised by a P²-tracked high quantile
+of recent scores, targeting a false-alarm *rate*. A **CUSUM** control chart,
+re-anchored on entering each bucket and scaled by the within-visit spread,
+accumulates sustained sub-threshold drift (low-and-slow) without firing on normal
+day-to-day regime shifts. Cold buckets fall back to a fast global baseline.
 
-The explanation is rendered from a fixed Korean template that includes the
-deviation magnitude, current vs. baseline values, and the top contributing
-sources for the offending window — no LLM, no free-form generation.
+The **first-seen detector** remembers every external destination the host has
+contacted (persisted in SQLite, survives restarts) and flags sustained traffic to
+a brand-new public server — the tell of quiet exfiltration or C2.
+
+Finally, a transparent **classifier** maps the deviating feature plus context
+(direction, protocol mix, time, top talkers) to a named hypothesis, a severity
+(관심 / 주의 / 경고 / 심각), an everyday-Korean summary, and a recommended action.
 
 ## CLI reference
 
 ```text
-nad list-interfaces                    # print Npcap device names
-nad capture   --interface <dev> [opts] # raw packet print (debug)
-nad serve     --interface <dev> [opts] # live dashboard
+nad list-interfaces                     # print Npcap device names
+nad capture -i <dev> [opts]             # raw packet print (debug)
+nad serve   -i <dev> [opts]             # live dashboard
 
-# Common options for `serve`:
-  --interface, -i   Npcap device string (required)
-  --filter, -f      BPF filter expression           [default: ip]
-  --host            Bind address                    [default: 127.0.0.1]
-  --port, -p        HTTP port                       [default: 8000]
-  --db              SQLite alert path               [default: nad.db]
-  --window-seconds  Aggregation window in seconds   [default: 1.0]
-  --z-threshold     Sigma threshold per feature     [default: 3.0]
-  --warmup          Windows before alerting starts  [default: 30]
-  --confirm         Consecutive anomalous windows
-                    required before firing          [default: 3]
-  --cooldown        Windows muted per feature
-                    after each alert                [default: 10]
+# serve — core options
+  -i, --interface     Npcap device string (required)
+  -f, --filter        BPF filter                         [default: ip]
+  -p, --port          HTTP port                          [default: 8000]
+      --window-seconds  aggregation window (s)           [default: 1.0]
+      --warmup        windows before alerting            [default: 30]
+      --confirm       consecutive windows to confirm     [default: 3]
+      --cooldown      windows muted after an alert        [default: 10]
+
+# serve — detector selection
+      --detector      baseline | adaptive                [default: baseline]
+      --bucketing     hour | weekend_hour | dow_hour     [default: weekend_hour]
+      --threshold-mode  combined | robust | rate         [default: combined]
+      --target-rate   target false-alarm fraction        [default: 0.005]
+      --robust-k      robust-Z floor (~sigma)            [default: 3.5]
+      --bucket-warmup windows before a bucket scores     [default: 200]
+
+# serve — behavioral axis (first-seen destinations)
+      --behavioral / --no-behavioral                     [default: on]
+      --firstseen-learning      windows to learn first   [default: 3600]
+      --firstseen-consecutive   windows to confirm new   [default: 5]
 ```
+
+`--detector adaptive` is the recommended engine; `baseline` is the original
+fixed-threshold EWMA detector, kept for comparison.
 
 ### Tuning false positives
 
-If the dashboard fires on every Chrome tab burst, raise `--confirm` (e.g. `5`)
-or `--z-threshold` (e.g. `4.0`). If real anomalies sneak through, lower them.
-Sensible ranges:
-
 | Knob | Range | Effect |
 |---|---|---|
-| `--z-threshold` | 2.5 – 5.0 | higher = fewer alerts, miss subtle signals |
-| `--confirm`     | 1 – 10    | higher = transient bursts ignored, slower to react |
-| `--cooldown`    | 0 – 30    | higher = less alert spam, possible miss-after-alert |
-| `--window-seconds` | 0.5 – 5 | smaller = more reactive, noisier features |
+| `--robust-k` | 3.0 – 5.0 | higher = fewer alerts, miss subtle signals |
+| `--target-rate` | 0.001 – 0.02 | lower = stricter auto-cutoff, fewer alerts |
+| `--confirm` | 1 – 10 | higher = transient bursts ignored, slower to react |
+| `--cooldown` | 0 – 30 | higher = less alert spam |
+| `--no-behavioral` | — | disable first-seen alerts (noisy on short runs) |
 
 ## Tests
 
 ```powershell
-pytest                               # full suite
-pytest tests/test_detect.py          # one file
-pytest -k "spike"                    # by name
+pytest                          # full suite (no elevation needed)
+pytest tests/test_adaptive.py   # one module
+pytest -k "cusum"               # by name
 ```
 
-The unit tests cover the OS-independent layers (features, detector, storage)
-and run on any Windows machine without elevation. The capture path is
-verified by manual smoke-test (`nad capture --limit ...`).
+Unit tests cover the OS-independent layers — streaming statistics, the adaptive
+and behavioral detectors, the classifier, features, and storage. The capture
+path is verified by manual smoke-test (`nad capture --limit ...`).
 
 ## Project layout
 
 ```
 src/nad/
-├── capture/
-│   ├── base.py           # Capture ABC + Packet dataclass
-│   ├── factory.py        # Windows-only factory
-│   └── windows_npcap.py  # ctypes binding to wpcap.dll
-├── features.py           # WindowAggregator
-├── detect.py             # BaselineDetector (EWMA Z-score + N-window confirm)
-├── storage.py            # SQLite AlertStore
-├── service.py            # capture → features → detect → store loop
-├── web/
-│   ├── app.py            # FastAPI app
-│   └── static/           # index.html + style.css + app.js
+├── capture/              # Npcap binding (ctypes → wpcap.dll) + Packet/Capture types
+├── features.py           # WindowAggregator → WindowFeatures (incl. shape features)
+├── stats.py              # RobustEwmaStat, P2Quantile, Cusum  (streaming, stdlib)
+├── detect.py             # BaselineDetector (original fixed-threshold EWMA)
+├── adaptive.py           # AdaptiveDetector: time buckets + auto-threshold + CUSUM
+├── behavioral.py         # FirstSeenDetector: never-before-seen destinations
+├── classify.py           # anomaly → category / severity / plain-language / action
+├── storage.py            # SQLite AlertStore + DestinationStore (persistent memory)
+├── service.py            # capture → features → detect(+behavioral) → store loop
+├── web/                  # FastAPI app + dashboard (index.html, style.css, app.js)
 └── cli.py                # `nad` console script
+scripts/
+├── evaluate.py           # synthetic labelled benchmark (+ --sweep)
+├── replay_pcap.py        # replay/chain pcaps through the real pipeline
+└── eval_unsw.py          # unsupervised evaluation on UNSW-NB15
+docs/adaptive-detection-design.md   # design notes
 tests/
 ```
 
@@ -214,27 +271,30 @@ tests/
 
 | Symptom | Likely cause |
 |---|---|
-| `RuntimeError: wpcap.dll not found` | Npcap not installed, or installed without WinPcap-compatible mode. Re-run the Npcap installer with that option enabled. |
-| `pcap_open_live failed` for a valid interface | Terminal not running as Administrator. |
-| Dashboard reaches 워밍업 0, but no alerts | Working as intended — your traffic is well-behaved. Lower `--z-threshold` or `--confirm` to make it more sensitive. |
-| Alerts spam every minute | Raise `--z-threshold` to 4.0 or `--confirm` to 5. |
-| `nad list-interfaces` shows only `\Device\NPF_*` GUIDs | Match them against PowerShell's `Get-NetAdapter \| Select Name, InterfaceGuid` to identify which is which. |
+| `wpcap.dll not found` | Npcap missing or installed without WinPcap-compatible mode. |
+| `pcap_open_live failed` | Terminal not running as Administrator. |
+| `nad` runs old code | The `nad` command points at a different editable install. Run `pip install -e .` in *this* folder. |
+| Many `처음 보는 외부 연결` early on | First-seen has no history yet — expected on short runs. Use `--no-behavioral` or let it learn. |
+| Korean/emoji garbled in scripts | `$env:PYTHONIOENCODING="utf-8"` before running. |
+| Alerts spam | Raise `--confirm` / `--robust-k`, or lower `--target-rate`. |
 
 ## Roadmap
 
-- [ ] Stage-2 anomaly scoring with Isolation Forest (gates only the windows
-      flagged by the statistical baseline).
-- [ ] SHAP feature attribution rendered into the existing alert templates.
-- [ ] Windows Service installer (so the daemon can run without an open
-      Administrator terminal).
-- [ ] Optional auth / TLS for remote dashboard access.
-- [ ] PCAP replay mode for repeatable testing.
+- [x] Adaptive per-time-bucket baselines with self-tuning threshold
+- [x] CUSUM for low-and-slow detection
+- [x] First-seen-destination behavioral axis
+- [x] Shape features + plain-language classifier
+- [x] PCAP replay mode for repeatable testing
+- [ ] Beacon (periodicity) detection for C2 channels
+- [ ] Per-host scan features (scans against busy backgrounds)
+- [ ] Windows Service installer; optional auth / TLS for remote dashboard
 
 ## Privacy
 
-NAD never connects out. All packet headers, payload prefixes (capped at 256
-bytes), and alerts stay in the SQLite file you point `--db` at. Delete the
-file to wipe history.
+NIDS-Win never connects out (the evaluation scripts download only datasets you
+choose). Packet headers, capped 256-byte payload prefixes, alerts, and the
+learned destination memory stay in the local SQLite file you point `--db` at.
+Delete the file to wipe history.
 
 ## License
 

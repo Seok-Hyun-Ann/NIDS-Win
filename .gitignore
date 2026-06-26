@@ -34,8 +34,14 @@ htmlcov/
 *.sqlite3
 *.duckdb
 data/
+Data/
 logs/
 *.log
+
+# Datasets & captures — too large for GitHub (100MB/file limit); download separately
+*.pcap
+*.pcapng
+*.csv
 
 # Editor / OS
 .vscode/
