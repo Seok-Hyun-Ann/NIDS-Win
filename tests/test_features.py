@@ -25,6 +25,31 @@ def test_window_emits_when_boundary_crosses():
     assert out.unique_src_ips == 1
 
 
+def test_shape_features_in_numeric():
+    from nad.features import WindowFeatures
+    w = WindowFeatures(
+        window_start_ns=0, window_end_ns=1, duration_s=1.0,
+        packet_count=10, bytes_total=1000, avg_payload_size=64.0,
+        unique_src_ips=2, unique_dst_ips=8, unique_dst_ports=3,
+        tcp_count=10, udp_count=0, icmp_count=0, other_count=0,
+        egress_bytes=900, ingress_bytes=100,
+    )
+    n = w.numeric()
+    assert n["egress_ratio"] == 90.0          # 900 / (900+100) * 100
+    assert n["fan_out"] == 4.0                # 8 dst / 2 src
+
+
+def test_egress_ratio_neutral_without_direction():
+    from nad.features import WindowFeatures
+    w = WindowFeatures(
+        window_start_ns=0, window_end_ns=1, duration_s=1.0,
+        packet_count=10, bytes_total=1000, avg_payload_size=64.0,
+        unique_src_ips=1, unique_dst_ips=1, unique_dst_ports=1,
+        tcp_count=10, udp_count=0, icmp_count=0, other_count=0,
+    )  # no egress/ingress -> neutral 50, never falsely fires
+    assert w.numeric()["egress_ratio"] == 50.0
+
+
 def test_window_top_k_counts():
     agg = WindowAggregator(window_seconds=1.0, top_k=3)
     base = 2_000_000_000

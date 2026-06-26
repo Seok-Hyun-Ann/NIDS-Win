@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .capture.base import Packet
+from .capture.base import Direction, Packet
 
 
 @dataclass(slots=True)
@@ -31,9 +31,30 @@ class WindowFeatures:
     top_src_ips: dict[str, int] = field(default_factory=dict)
     top_dst_ips: dict[str, int] = field(default_factory=dict)
     top_dst_ports: dict[int, int] = field(default_factory=dict)
+    # Directional split (UNKNOWN-direction packets count toward neither). Used by
+    # the behavioural classifier — e.g. egress-heavy bytes suggest exfiltration.
+    egress_bytes: int = 0
+    ingress_bytes: int = 0
+    egress_packets: int = 0
+    ingress_packets: int = 0
+    # Full per-window destination IP counts (not just top-k) — the behavioural
+    # first-seen detector needs every destination. Dropped from the dashboard API
+    # to keep responses small; held only in memory for the current window.
+    all_dst_ips: dict[str, int] = field(default_factory=dict)
 
     def numeric(self) -> dict[str, float]:
-        """Subset of fields the detector treats as time-series signals."""
+        """Subset of fields the detector treats as time-series signals.
+
+        Includes *shape* features (egress_ratio, fan_out) so that traffic whose
+        volume looks normal but whose structure is off — e.g. a transfer that is
+        almost entirely outbound (exfiltration), or one host fanning out to many
+        destinations (scanning) — is anomalous in its own right, not only when it
+        also spikes in volume.
+        """
+        directed = self.egress_bytes + self.ingress_bytes
+        # Neutral 50 when direction is unavailable, so it never falsely fires.
+        egress_ratio = 100.0 * self.egress_bytes / directed if directed else 50.0
+        fan_out = self.unique_dst_ips / max(self.unique_src_ips, 1)
         return {
             "packet_count": float(self.packet_count),
             "bytes_total": float(self.bytes_total),
@@ -44,6 +65,8 @@ class WindowFeatures:
             "tcp_count": float(self.tcp_count),
             "udp_count": float(self.udp_count),
             "icmp_count": float(self.icmp_count),
+            "egress_ratio": egress_ratio,
+            "fan_out": float(fan_out),
         }
 
 
@@ -71,6 +94,10 @@ class WindowAggregator:
         self._udp = 0
         self._icmp = 0
         self._other = 0
+        self._egress_bytes = 0
+        self._ingress_bytes = 0
+        self._egress_pkts = 0
+        self._ingress_pkts = 0
         self._src_ips: Counter[str] = Counter()
         self._dst_ips: Counter[str] = Counter()
         self._dst_ports: Counter[int] = Counter()
@@ -96,6 +123,11 @@ class WindowAggregator:
             top_src_ips=dict(self._src_ips.most_common(self.top_k)),
             top_dst_ips=dict(self._dst_ips.most_common(self.top_k)),
             top_dst_ports=dict(self._dst_ports.most_common(self.top_k)),
+            egress_bytes=self._egress_bytes,
+            ingress_bytes=self._ingress_bytes,
+            egress_packets=self._egress_pkts,
+            ingress_packets=self._ingress_pkts,
+            all_dst_ips=dict(self._dst_ips),
         )
         self._reset_buckets()
         return feats
@@ -123,6 +155,12 @@ class WindowAggregator:
             self._icmp += 1
         else:
             self._other += 1
+        if packet.direction == Direction.EGRESS:
+            self._egress_bytes += packet.total_len
+            self._egress_pkts += 1
+        elif packet.direction == Direction.INGRESS:
+            self._ingress_bytes += packet.total_len
+            self._ingress_pkts += 1
         self._src_ips[packet.src_ip] += 1
         self._dst_ips[packet.dst_ip] += 1
         if packet.dst_port:

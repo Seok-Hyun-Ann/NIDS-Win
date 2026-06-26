@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from .classify import classify
 from .features import WindowFeatures
 
 
@@ -23,8 +24,13 @@ class Alert:
     baseline_std: float
     z_score: float
     direction: str          # "above" or "below"
-    explanation: str
+    explanation: str        # technical detail (sigma, feature name) — for analysts
     context: dict = field(default_factory=dict)
+    # Plain-language layer for non-experts (filled by nad.classify).
+    category: str = ""          # named hypothesis, e.g. "포트 스캔 의심"
+    severity: str = ""          # 관심 | 주의 | 경고 | 심각
+    summary: str = ""           # everyday-Korean, with real numbers, no jargon
+    recommendation: str = ""    # what to do
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +43,10 @@ class Alert:
             "direction": self.direction,
             "explanation": self.explanation,
             "context": self.context,
+            "category": self.category,
+            "severity": self.severity,
+            "summary": self.summary,
+            "recommendation": self.recommendation,
         }
 
 
@@ -80,6 +90,8 @@ _FEATURE_LABELS = {
     "tcp_count":        ("TCP 패킷 수",      "packets/window"),
     "udp_count":        ("UDP 패킷 수",      "packets/window"),
     "icmp_count":       ("ICMP 패킷 수",     "packets/window"),
+    "egress_ratio":     ("나가는 데이터 비율", "%"),
+    "fan_out":          ("목적지 분산도",     "dst/src"),
 }
 
 
@@ -163,6 +175,7 @@ class BaselineDetector:
                     self._streak[name] = self._streak.get(name, 0) + 1
                     if self._streak[name] >= self.confirm_windows:
                         std = math.sqrt(stat.var)
+                        c = classify(name, value, stat.mean, z, window)
                         alerts.append(Alert(
                             timestamp_ns=window.window_end_ns,
                             feature=name,
@@ -173,6 +186,10 @@ class BaselineDetector:
                             direction="above" if z > 0 else "below",
                             explanation=_explain(name, value, stat.mean, std, z, ctx_full),
                             context=ctx_full,
+                            category=c.category,
+                            severity=c.severity,
+                            summary=c.summary,
+                            recommendation=c.recommendation,
                         ))
                         self._cooldown[name] = self.cooldown_windows
                         self._streak[name] = 0
