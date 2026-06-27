@@ -92,6 +92,7 @@ _FEATURE_LABELS = {
     "icmp_count":       ("ICMP 패킷 수",     "packets/window"),
     "egress_ratio":     ("나가는 데이터 비율", "%"),
     "fan_out":          ("목적지 분산도",     "dst/src"),
+    "max_ports_per_dst": ("단일 호스트 포트 수", "ports"),
 }
 
 

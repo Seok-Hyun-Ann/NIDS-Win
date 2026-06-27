@@ -113,6 +113,14 @@ def classify(
             f"{times}). 총량은 크지 않아도 네트워크 스캔이나 감염 확산일 수 있습니다.",
             "예상치 못한 동작이면 백신 검사를 권장합니다.")
 
+    if feature == "max_ports_per_dst" and above:
+        return Classification(
+            "포트 스캔 의심 (단일 호스트)", severity,
+            f"한 대상에 대해 짧은 시간에 많은 포트({value:.0f}개)로 접속을 시도했습니다 "
+            f"({times}). 특정 기기의 열린 포트를 훑는 수직 포트 스캔일 수 있습니다."
+            + (f" 대상: {dst_ips}." if dst_ips else ""),
+            "의심되면 해당 대상과의 연결을 차단하고 점검하세요.")
+
     if feature == "unique_dst_ports" and above:
         return Classification(
             "포트 스캔 의심", severity,

@@ -39,6 +39,18 @@ def test_shape_features_in_numeric():
     assert n["fan_out"] == 4.0                # 8 dst / 2 src
 
 
+def test_max_ports_per_dst_counts_vertical_scan():
+    agg = WindowAggregator(window_seconds=1.0)
+    base = 5_000_000_000
+    for p in range(20, 28):                       # 8 distinct ports to ONE host
+        agg.add(_pkt(base, dst="10.0.0.9", dp=p))
+    agg.add(_pkt(base, dst="10.0.0.5", dp=80))    # 1 port to a different host
+    out = agg.add(_pkt(base + 1_000_000_000))     # cross into next window → emit
+    assert out is not None
+    assert out.max_ports_per_dst == 8
+    assert out.numeric()["max_ports_per_dst"] == 8.0
+
+
 def test_egress_ratio_neutral_without_direction():
     from nad.features import WindowFeatures
     w = WindowFeatures(

@@ -55,6 +55,12 @@ def test_fan_out_hypothesis():
     assert c.category == "스캔/확산 의심"
 
 
+def test_vertical_port_scan_hypothesis():
+    c = classify("max_ports_per_dst", value=50, mean=3, z=8.0,
+                 window=_w(dst_ips={"10.0.0.9": 50}))
+    assert c.category == "포트 스캔 의심 (단일 호스트)"
+
+
 def test_off_hours_activity():
     c = classify("packet_count", value=560, mean=40, z=8.0, window=_w(hour=3),
                  tz=timezone.utc)

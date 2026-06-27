@@ -41,6 +41,10 @@ class WindowFeatures:
     # first-seen detector needs every destination. Dropped from the dashboard API
     # to keep responses small; held only in memory for the current window.
     all_dst_ips: dict[str, int] = field(default_factory=dict)
+    # Most ports contacted on any single destination this window — a vertical
+    # port scan stands out here even when total ports look normal against busy
+    # background traffic.
+    max_ports_per_dst: int = 0
 
     def numeric(self) -> dict[str, float]:
         """Subset of fields the detector treats as time-series signals.
@@ -67,6 +71,7 @@ class WindowFeatures:
             "icmp_count": float(self.icmp_count),
             "egress_ratio": egress_ratio,
             "fan_out": float(fan_out),
+            "max_ports_per_dst": float(self.max_ports_per_dst),
         }
 
 
@@ -101,6 +106,7 @@ class WindowAggregator:
         self._src_ips: Counter[str] = Counter()
         self._dst_ips: Counter[str] = Counter()
         self._dst_ports: Counter[int] = Counter()
+        self._ports_by_dst: dict[str, set[int]] = {}
 
     def _emit(self) -> WindowFeatures:
         assert self._window_start_ns is not None
@@ -128,6 +134,8 @@ class WindowAggregator:
             egress_packets=self._egress_pkts,
             ingress_packets=self._ingress_pkts,
             all_dst_ips=dict(self._dst_ips),
+            max_ports_per_dst=max((len(s) for s in self._ports_by_dst.values()),
+                                  default=0),
         )
         self._reset_buckets()
         return feats
@@ -165,6 +173,7 @@ class WindowAggregator:
         self._dst_ips[packet.dst_ip] += 1
         if packet.dst_port:
             self._dst_ports[packet.dst_port] += 1
+            self._ports_by_dst.setdefault(packet.dst_ip, set()).add(packet.dst_port)
         return emitted
 
     def flush(self) -> Optional[WindowFeatures]:
